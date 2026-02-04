@@ -16,11 +16,13 @@ const OPENAI_RESPONSES_APIS = new Set(["openai-responses"]);
 const OPENAI_RESPONSES_PROVIDERS = new Set(["openai"]);
 
 /**
- * Required headers for GitHub Copilot Enterprise accounts.
+ * Default headers for GitHub Copilot Enterprise accounts.
  * Without these headers, Enterprise accounts receive HTTP 421 Misdirected Request.
  * See: https://github.com/openclaw/openclaw/issues/1797
+ *
+ * These can be overridden via config: models.providers["github-copilot"].headers
  */
-const GITHUB_COPILOT_HEADERS: Record<string, string> = {
+const DEFAULT_GITHUB_COPILOT_HEADERS: Record<string, string> = {
   "User-Agent": "GitHubCopilotChat/0.35.0",
   "Editor-Version": "vscode/1.107.0",
   "Editor-Plugin-Version": "copilot-chat/0.35.0",
@@ -329,14 +331,20 @@ function createZaiToolStreamWrapper(
  * Create a streamFn wrapper that adds GitHub Copilot IDE headers.
  * Required for Enterprise accounts to avoid HTTP 421 Misdirected Request.
  * See: https://github.com/openclaw/openclaw/issues/1797
+ *
+ * @param configHeaders - Optional headers from config to override defaults
  */
-function createGitHubCopilotHeadersWrapper(baseStreamFn: StreamFn | undefined): StreamFn {
+function createGitHubCopilotHeadersWrapper(
+  baseStreamFn: StreamFn | undefined,
+  configHeaders?: Record<string, string>,
+): StreamFn {
   const underlying = baseStreamFn ?? streamSimple;
+  const headers = { ...DEFAULT_GITHUB_COPILOT_HEADERS, ...configHeaders };
   return (model, context, options) =>
     underlying(model, context, {
       ...options,
       headers: {
-        ...GITHUB_COPILOT_HEADERS,
+        ...headers,
         ...options?.headers,
       },
     });
@@ -363,7 +371,9 @@ export function applyExtraParamsToAgent(
   const override =
     extraParamsOverride && Object.keys(extraParamsOverride).length > 0
       ? Object.fromEntries(
-          Object.entries(extraParamsOverride).filter(([, value]) => value !== undefined),
+          Object.entries(extraParamsOverride).filter(
+            ([, value]) => value !== undefined && value !== null,
+          ),
         )
       : undefined;
   const merged = Object.assign({}, extraParams, override);
@@ -398,8 +408,10 @@ export function applyExtraParamsToAgent(
   }
 
   if (provider === "github-copilot") {
+    const providerConfig = cfg?.models?.providers?.["github-copilot"];
+    const configHeaders = providerConfig?.headers;
     log.debug(`applying GitHub Copilot IDE headers for ${provider}/${modelId}`);
-    agent.streamFn = createGitHubCopilotHeadersWrapper(agent.streamFn);
+    agent.streamFn = createGitHubCopilotHeadersWrapper(agent.streamFn, configHeaders);
   }
 
   // Work around upstream pi-ai hardcoding `store: false` for Responses API.

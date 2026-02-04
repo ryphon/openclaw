@@ -1000,7 +1000,8 @@ Docs: https://docs.openclaw.ai
 - TUI: block onboarding output while TUI is active and restore terminal state on exit.
 - CLI: cache shell completion scripts in state dir and source cached files in profiles.
 - Zsh completion: escape option descriptions to avoid invalid option errors.
-- GitHub Copilot: add required IDE headers to fix HTTP 421 Misdirected Request for Enterprise accounts. (#1797) Thanks @at10ti0n.
+- GitHub Copilot: add required IDE headers to fix HTTP 421 Misdirected Request for Enterprise accounts; headers are now configurable via `models.providers["github-copilot"].headers`. (#1797) Thanks @at10ti0n.
+- Extra params: filter out `null` values from extraParamsOverride to prevent unintentional config overrides.
 - Agents: repair malformed tool calls and session transcripts. (#7473) Thanks @justinhuangcode.
 - fix(agents): validate AbortSignal instances before calling AbortSignal.any() (#7277) (thanks @Elarwei001)
 - fix(webchat): respect user scroll position during streaming and refresh (#7226) (thanks @marcomarandiz)

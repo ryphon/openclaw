@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import type { OpenClawConfig } from "../../config/config.js";
 import { applyExtraParamsToAgent } from "./extra-params.js";
 
 describe("applyExtraParamsToAgent", () => {
@@ -57,6 +58,47 @@ describe("applyExtraParamsToAgent", () => {
       });
     });
 
+    it("allows config to override default Copilot headers", async () => {
+      const capturedOptions: Array<{ headers?: Record<string, string> }> = [];
+      const mockStreamFn = vi.fn((_model, _context, options) => {
+        capturedOptions.push(options ?? {});
+        return (async function* () {
+          yield { type: "text" as const, text: "test" };
+        })();
+      });
+
+      const cfg: OpenClawConfig = {
+        models: {
+          providers: {
+            "github-copilot": {
+              baseUrl: "https://api.github.com",
+              headers: {
+                "Editor-Version": "vscode/1.120.0",
+                "X-Custom-Header": "custom-value",
+              },
+              models: [],
+            },
+          },
+        },
+      };
+
+      const agent = { streamFn: mockStreamFn };
+      applyExtraParamsToAgent(agent, cfg, "github-copilot", "gpt-4o");
+
+      const gen = agent.streamFn({} as never, {} as never, {});
+      for await (const _ of gen) {
+        // consume
+      }
+
+      expect(capturedOptions[0].headers).toMatchObject({
+        "User-Agent": "GitHubCopilotChat/0.35.0", // default preserved
+        "Editor-Version": "vscode/1.120.0", // overridden from config
+        "Editor-Plugin-Version": "copilot-chat/0.35.0", // default preserved
+        "Copilot-Integration-Id": "vscode-chat", // default preserved
+        "X-Custom-Header": "custom-value", // added from config
+      });
+    });
+
     it("does not add Copilot headers for other providers", () => {
       const mockStreamFn = vi.fn();
       const agent = { streamFn: mockStreamFn };
@@ -89,6 +131,46 @@ describe("applyExtraParamsToAgent", () => {
         "HTTP-Referer": "https://openclaw.ai",
         "X-Title": "OpenClaw",
       });
+    });
+  });
+
+  describe("extraParamsOverride null filtering", () => {
+    it("filters out null and undefined values from extraParamsOverride", async () => {
+      const capturedOptions: Array<Record<string, unknown>> = [];
+      const mockStreamFn = vi.fn((_model, _context, options) => {
+        capturedOptions.push(options ?? {});
+        return (async function* () {
+          yield { type: "text" as const, text: "test" };
+        })();
+      });
+
+      const cfg: OpenClawConfig = {
+        agents: {
+          defaults: {
+            models: {
+              "openrouter/anthropic/claude-3-opus": {
+                params: { temperature: 0.7, maxTokens: 1000 },
+              },
+            },
+          },
+        },
+      };
+
+      const agent = { streamFn: mockStreamFn };
+      // Pass null values that should be filtered out, preserving config values
+      applyExtraParamsToAgent(agent, cfg, "openrouter", "anthropic/claude-3-opus", {
+        temperature: null, // should be filtered, config value preserved
+        maxTokens: undefined, // should be filtered, config value preserved
+      });
+
+      const gen = agent.streamFn({} as never, {} as never, {});
+      for await (const _ of gen) {
+        // consume
+      }
+
+      // Config values should be preserved since null/undefined overrides are filtered
+      expect(capturedOptions[0].temperature).toBe(0.7);
+      expect(capturedOptions[0].maxTokens).toBe(1000);
     });
   });
 });
