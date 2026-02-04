@@ -16,6 +16,18 @@ const OPENAI_RESPONSES_APIS = new Set(["openai-responses"]);
 const OPENAI_RESPONSES_PROVIDERS = new Set(["openai"]);
 
 /**
+ * Required headers for GitHub Copilot Enterprise accounts.
+ * Without these headers, Enterprise accounts receive HTTP 421 Misdirected Request.
+ * See: https://github.com/openclaw/openclaw/issues/1797
+ */
+const GITHUB_COPILOT_HEADERS: Record<string, string> = {
+  "User-Agent": "GitHubCopilotChat/0.35.0",
+  "Editor-Version": "vscode/1.107.0",
+  "Editor-Plugin-Version": "copilot-chat/0.35.0",
+  "Copilot-Integration-Id": "vscode-chat",
+};
+
+/**
  * Resolve provider-specific extra params from model config.
  * Used to pass through stream params like temperature/maxTokens.
  *
@@ -314,6 +326,23 @@ function createZaiToolStreamWrapper(
 }
 
 /**
+ * Create a streamFn wrapper that adds GitHub Copilot IDE headers.
+ * Required for Enterprise accounts to avoid HTTP 421 Misdirected Request.
+ * See: https://github.com/openclaw/openclaw/issues/1797
+ */
+function createGitHubCopilotHeadersWrapper(baseStreamFn: StreamFn | undefined): StreamFn {
+  const underlying = baseStreamFn ?? streamSimple;
+  return (model, context, options) =>
+    underlying(model, context, {
+      ...options,
+      headers: {
+        ...GITHUB_COPILOT_HEADERS,
+        ...options?.headers,
+      },
+    });
+}
+
+/**
  * Apply extra params (like temperature) to an agent's streamFn.
  * Also adds OpenRouter app attribution headers when using the OpenRouter provider.
  *
@@ -366,6 +395,11 @@ export function applyExtraParamsToAgent(
       log.debug(`enabling Z.AI tool_stream for ${provider}/${modelId}`);
       agent.streamFn = createZaiToolStreamWrapper(agent.streamFn, true);
     }
+  }
+
+  if (provider === "github-copilot") {
+    log.debug(`applying GitHub Copilot IDE headers for ${provider}/${modelId}`);
+    agent.streamFn = createGitHubCopilotHeadersWrapper(agent.streamFn);
   }
 
   // Work around upstream pi-ai hardcoding `store: false` for Responses API.
