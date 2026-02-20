@@ -300,6 +300,7 @@ export async function compactEmbeddedPiSessionDirect(
         githubToken: apiKeyInfo.apiKey,
       });
       authStorage.setRuntimeApiKey(model.provider, copilotToken.token);
+      model.baseUrl = copilotToken.baseUrl;
     } else {
       authStorage.setRuntimeApiKey(model.provider, apiKeyInfo.apiKey);
     }
