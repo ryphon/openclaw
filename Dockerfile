@@ -10,6 +10,7 @@ USER root
 RUN corepack enable
 
 WORKDIR /app
+RUN chown node:node /app
 
 # Optional extra apk packages (equivalent to former OPENCLAW_DOCKER_APT_PACKAGES).
 # Package names follow wolfi/apk conventions, not apt.
@@ -19,22 +20,26 @@ RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
     fi
 
 # Layer-cache dependency manifests before copying source
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
-COPY ui/package.json ./ui/package.json
-COPY patches ./patches
-COPY scripts ./scripts
+COPY --chown=node:node package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
+COPY --chown=node:node ui/package.json ./ui/package.json
+COPY --chown=node:node patches ./patches
+COPY --chown=node:node scripts ./scripts
 
+USER node
 RUN pnpm install --frozen-lockfile
 
 # Optionally bake Chromium into the image for browser automation.
 # Build with: docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 ...
 # On Wolfi, chromium is installed via apk (no apt); xvfb is xvfb-run.
+# Must run after pnpm install so playwright-core is available in node_modules.
+USER root
 ARG OPENCLAW_INSTALL_BROWSER=""
 RUN if [ -n "$OPENCLAW_INSTALL_BROWSER" ]; then \
       apk add --no-cache chromium xvfb-run; \
     fi
 
-COPY . .
+USER node
+COPY --chown=node:node . .
 
 # Force pnpm for UI build (bun may fail on ARM/Synology)
 ENV OPENCLAW_PREFER_PNPM=1

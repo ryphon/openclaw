@@ -15,7 +15,13 @@ import { shouldAckReaction as shouldAckReactionGate } from "../../channels/ack-r
 import { logTypingFailure, logAckFailure } from "../../channels/logging.js";
 import { createReplyPrefixOptions } from "../../channels/reply-prefix.js";
 import { recordInboundSession } from "../../channels/session.js";
+import {
+  createStatusReactionController,
+  DEFAULT_TIMING,
+  type StatusReactionAdapter,
+} from "../../channels/status-reactions.js";
 import { createTypingCallbacks } from "../../channels/typing.js";
+import { resolveDiscordPreviewStreamMode } from "../../config/discord-preview-streaming.js";
 import { resolveMarkdownTableMode } from "../../config/markdown-tables.js";
 import { readSessionUpdatedAt, resolveStorePath } from "../../config/sessions.js";
 import { danger, logVerbose, shouldLogVerbose } from "../../globals.js";
@@ -43,260 +49,10 @@ import { deliverDiscordReply } from "./reply-delivery.js";
 import { resolveDiscordAutoThreadReplyPlan, resolveDiscordThreadStarter } from "./threading.js";
 import { sendTyping } from "./typing.js";
 
-const DISCORD_STATUS_THINKING_EMOJI_DEFAULT = "🧠";
-const DISCORD_STATUS_TOOL_EMOJI_DEFAULT = "🛠️";
-const DISCORD_STATUS_CODING_EMOJI_DEFAULT = "💻";
-const DISCORD_STATUS_WEB_EMOJI_DEFAULT = "🌐";
-const DISCORD_STATUS_DONE_EMOJI_DEFAULT = "✅";
-const DISCORD_STATUS_ERROR_EMOJI_DEFAULT = "❌";
-const DISCORD_STATUS_STALL_SOFT_EMOJI_DEFAULT = "⏳";
-const DISCORD_STATUS_STALL_HARD_EMOJI_DEFAULT = "⚠️";
-const DISCORD_STATUS_DONE_HOLD_MS = 1500;
-const DISCORD_STATUS_ERROR_HOLD_MS = 2500;
-const DISCORD_STATUS_DEBOUNCE_MS = 700;
-const DISCORD_STATUS_STALL_SOFT_MS = 10_000;
-const DISCORD_STATUS_STALL_HARD_MS = 30_000;
-
-type DiscordStatusEmojis = {
-  thinking: string;
-  tool: string;
-  coding: string;
-  web: string;
-  done: string;
-  error: string;
-  stallSoft: string;
-  stallHard: string;
-};
-
-const CODING_STATUS_TOOL_TOKENS = [
-  "exec",
-  "process",
-  "read",
-  "write",
-  "edit",
-  "session_status",
-  "bash",
-];
-
-const WEB_STATUS_TOOL_TOKENS = ["web_search", "web-search", "web_fetch", "web-fetch", "browser"];
-
-function resolveToolStatusEmoji(toolName: string | undefined, emojis: DiscordStatusEmojis): string {
-  const normalized = toolName?.trim().toLowerCase() ?? "";
-  if (!normalized) {
-    return emojis.tool;
-  }
-  if (WEB_STATUS_TOOL_TOKENS.some((token) => normalized.includes(token))) {
-    return emojis.web;
-  }
-  if (CODING_STATUS_TOOL_TOKENS.some((token) => normalized.includes(token))) {
-    return emojis.coding;
-  }
-  return emojis.tool;
-}
-
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
-}
-
-function createDiscordStatusReactionController(params: {
-  enabled: boolean;
-  channelId: string;
-  messageId: string;
-  initialEmoji: string;
-  rest: unknown;
-  emojis: DiscordStatusEmojis;
-}) {
-  let activeEmoji: string | null = null;
-  let chain: Promise<void> = Promise.resolve();
-  let pendingEmoji: string | null = null;
-  let pendingTimer: ReturnType<typeof setTimeout> | null = null;
-  let finished = false;
-  let softStallTimer: ReturnType<typeof setTimeout> | null = null;
-  let hardStallTimer: ReturnType<typeof setTimeout> | null = null;
-
-  const enqueue = (work: () => Promise<void>) => {
-    chain = chain.then(work).catch((err) => {
-      logAckFailure({
-        log: logVerbose,
-        channel: "discord",
-        target: `${params.channelId}/${params.messageId}`,
-        error: err,
-      });
-    });
-    return chain;
-  };
-
-  const clearStallTimers = () => {
-    if (softStallTimer) {
-      clearTimeout(softStallTimer);
-      softStallTimer = null;
-    }
-    if (hardStallTimer) {
-      clearTimeout(hardStallTimer);
-      hardStallTimer = null;
-    }
-  };
-
-  const clearPendingDebounce = () => {
-    if (pendingTimer) {
-      clearTimeout(pendingTimer);
-      pendingTimer = null;
-    }
-    pendingEmoji = null;
-  };
-
-  const applyEmoji = (emoji: string) =>
-    enqueue(async () => {
-      if (!params.enabled || !emoji || activeEmoji === emoji) {
-        return;
-      }
-      const previousEmoji = activeEmoji;
-      await reactMessageDiscord(params.channelId, params.messageId, emoji, {
-        rest: params.rest as never,
-      });
-      activeEmoji = emoji;
-      if (previousEmoji && previousEmoji !== emoji) {
-        await removeReactionDiscord(params.channelId, params.messageId, previousEmoji, {
-          rest: params.rest as never,
-        });
-      }
-    });
-
-  const requestEmoji = (emoji: string, options?: { immediate?: boolean }) => {
-    if (!params.enabled || !emoji) {
-      return Promise.resolve();
-    }
-    if (options?.immediate) {
-      clearPendingDebounce();
-      return applyEmoji(emoji);
-    }
-    pendingEmoji = emoji;
-    if (pendingTimer) {
-      clearTimeout(pendingTimer);
-    }
-    pendingTimer = setTimeout(() => {
-      pendingTimer = null;
-      const emojiToApply = pendingEmoji;
-      pendingEmoji = null;
-      if (!emojiToApply || emojiToApply === activeEmoji) {
-        return;
-      }
-      void applyEmoji(emojiToApply);
-    }, DISCORD_STATUS_DEBOUNCE_MS);
-    return Promise.resolve();
-  };
-
-  const scheduleStallTimers = () => {
-    if (!params.enabled || finished) {
-      return;
-    }
-    clearStallTimers();
-    softStallTimer = setTimeout(() => {
-      if (finished) {
-        return;
-      }
-      void requestEmoji(params.emojis.stallSoft, { immediate: true });
-    }, DISCORD_STATUS_STALL_SOFT_MS);
-    hardStallTimer = setTimeout(() => {
-      if (finished) {
-        return;
-      }
-      void requestEmoji(params.emojis.stallHard, { immediate: true });
-    }, DISCORD_STATUS_STALL_HARD_MS);
-  };
-
-  const setPhase = (emoji: string) => {
-    if (!params.enabled || finished) {
-      return Promise.resolve();
-    }
-    scheduleStallTimers();
-    return requestEmoji(emoji);
-  };
-
-  const setTerminal = async (emoji: string) => {
-    if (!params.enabled) {
-      return;
-    }
-    finished = true;
-    clearStallTimers();
-    await requestEmoji(emoji, { immediate: true });
-  };
-
-  const clear = async () => {
-    if (!params.enabled) {
-      return;
-    }
-    finished = true;
-    clearStallTimers();
-    clearPendingDebounce();
-    await enqueue(async () => {
-      // Include both configured and default emojis so cleanup works even when
-      // the config changed between message start and reply completion.
-      const cleanupCandidates = new Set<string>([
-        params.initialEmoji,
-        activeEmoji ?? "",
-        params.emojis.thinking,
-        params.emojis.tool,
-        params.emojis.coding,
-        params.emojis.web,
-        params.emojis.done,
-        params.emojis.error,
-        params.emojis.stallSoft,
-        params.emojis.stallHard,
-        DISCORD_STATUS_THINKING_EMOJI_DEFAULT,
-        DISCORD_STATUS_TOOL_EMOJI_DEFAULT,
-        DISCORD_STATUS_CODING_EMOJI_DEFAULT,
-        DISCORD_STATUS_WEB_EMOJI_DEFAULT,
-        DISCORD_STATUS_DONE_EMOJI_DEFAULT,
-        DISCORD_STATUS_ERROR_EMOJI_DEFAULT,
-        DISCORD_STATUS_STALL_SOFT_EMOJI_DEFAULT,
-        DISCORD_STATUS_STALL_HARD_EMOJI_DEFAULT,
-      ]);
-      activeEmoji = null;
-      for (const emoji of cleanupCandidates) {
-        if (!emoji) {
-          continue;
-        }
-        try {
-          await removeReactionDiscord(params.channelId, params.messageId, emoji, {
-            rest: params.rest as never,
-          });
-        } catch (err) {
-          logAckFailure({
-            log: logVerbose,
-            channel: "discord",
-            target: `${params.channelId}/${params.messageId}`,
-            error: err,
-          });
-        }
-      }
-    });
-  };
-
-  const restoreInitial = async () => {
-    if (!params.enabled) {
-      return;
-    }
-    finished = true;
-    clearStallTimers();
-    clearPendingDebounce();
-    await requestEmoji(params.initialEmoji, { immediate: true });
-  };
-
-  return {
-    setQueued: () => {
-      scheduleStallTimers();
-      return requestEmoji(params.initialEmoji, { immediate: true });
-    },
-    setThinking: () => setPhase(params.emojis.thinking),
-    setTool: (toolName?: string) => setPhase(resolveToolStatusEmoji(toolName, params.emojis)),
-    setDone: () => setTerminal(params.emojis.done),
-    setError: () => setTerminal(params.emojis.error),
-    clear,
-    restoreInitial,
-  };
 }
 
 export async function processDiscordMessage(ctx: DiscordMessagePreflightContext) {
@@ -339,6 +95,8 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     guildSlug,
     channelConfig,
     baseSessionKey,
+    boundSessionKey,
+    threadBindings,
     route,
     commandAuthorized,
   } = ctx;
@@ -372,23 +130,31 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     );
   const statusReactionsConfig = discordConfig?.statusReactions;
   const statusReactionsEnabled = shouldAckReaction() && statusReactionsConfig?.enabled !== false;
-  const statusEmojis: DiscordStatusEmojis = {
-    thinking: statusReactionsConfig?.emojis?.thinking ?? DISCORD_STATUS_THINKING_EMOJI_DEFAULT,
-    tool: statusReactionsConfig?.emojis?.tool ?? DISCORD_STATUS_TOOL_EMOJI_DEFAULT,
-    coding: statusReactionsConfig?.emojis?.coding ?? DISCORD_STATUS_CODING_EMOJI_DEFAULT,
-    web: statusReactionsConfig?.emojis?.web ?? DISCORD_STATUS_WEB_EMOJI_DEFAULT,
-    done: statusReactionsConfig?.emojis?.done ?? DISCORD_STATUS_DONE_EMOJI_DEFAULT,
-    error: statusReactionsConfig?.emojis?.error ?? DISCORD_STATUS_ERROR_EMOJI_DEFAULT,
-    stallSoft: statusReactionsConfig?.emojis?.stallSoft ?? DISCORD_STATUS_STALL_SOFT_EMOJI_DEFAULT,
-    stallHard: statusReactionsConfig?.emojis?.stallHard ?? DISCORD_STATUS_STALL_HARD_EMOJI_DEFAULT,
+  const discordAdapter: StatusReactionAdapter = {
+    setReaction: async (emoji) => {
+      await reactMessageDiscord(messageChannelId, message.id, emoji, {
+        rest: client.rest as never,
+      });
+    },
+    removeReaction: async (emoji) => {
+      await removeReactionDiscord(messageChannelId, message.id, emoji, {
+        rest: client.rest as never,
+      });
+    },
   };
-  const statusReactions = createDiscordStatusReactionController({
+  const statusReactions = createStatusReactionController({
     enabled: statusReactionsEnabled,
-    channelId: messageChannelId,
-    messageId: message.id,
+    adapter: discordAdapter,
     initialEmoji: ackReaction,
-    rest: client.rest,
-    emojis: statusEmojis,
+    emojis: statusReactionsConfig?.emojis,
+    onError: (err) => {
+      logAckFailure({
+        log: logVerbose,
+        channel: "discord",
+        target: `${messageChannelId}/${message.id}`,
+        error: err,
+      });
+    },
   });
   if (statusReactionsEnabled) {
     void statusReactions.setQueued();
@@ -563,7 +329,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     CommandBody: baseText,
     From: effectiveFrom,
     To: effectiveTo,
-    SessionKey: autoThreadContext?.SessionKey ?? threadKeys.sessionKey,
+    SessionKey: boundSessionKey ?? autoThreadContext?.SessionKey ?? threadKeys.sessionKey,
     AccountId: route.accountId,
     ChatType: isDirectMessage ? "direct" : "channel",
     ConversationLabel: fromLabel,
@@ -585,6 +351,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
     ReplyToBody: replyContext?.body,
     ReplyToSender: replyContext?.sender,
     ParentSessionKey: autoThreadContext?.ParentSessionKey ?? threadKeys.parentSessionKey,
+    MessageThreadId: threadChannel?.id ?? autoThreadContext?.createdThreadId ?? undefined,
     ThreadStarterBody: threadStarterBody,
     ThreadLabel: threadLabel,
     Timestamp: resolveTimestampMs(message.timestamp),
@@ -649,7 +416,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
   });
 
   // --- Discord draft stream (edit-based preview streaming) ---
-  const discordStreamMode = discordConfig?.streamMode ?? "off";
+  const discordStreamMode = resolveDiscordPreviewStreamMode(discordConfig);
   const draftMaxChars = Math.min(textLimit, 2000);
   const accountBlockStreamingEnabled =
     typeof discordConfig?.blockStreaming === "boolean"
@@ -867,10 +634,13 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
         rest: client.rest,
         runtime,
         replyToId,
+        replyToMode,
         textLimit,
         maxLinesPerMessage: discordConfig?.maxLinesPerMessage,
         tableMode,
         chunkMode,
+        sessionKey: ctxPayload.SessionKey,
+        threadBindings,
       });
       replyReference.markSent();
     },
@@ -948,7 +718,7 @@ export async function processDiscordMessage(ctx: DiscordMessagePreflightContext)
       }
       if (removeAckAfterReply) {
         void (async () => {
-          await sleep(dispatchError ? DISCORD_STATUS_ERROR_HOLD_MS : DISCORD_STATUS_DONE_HOLD_MS);
+          await sleep(dispatchError ? DEFAULT_TIMING.errorHoldMs : DEFAULT_TIMING.doneHoldMs);
           await statusReactions.clear();
         })();
       } else {
