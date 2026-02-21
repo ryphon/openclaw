@@ -1,3 +1,4 @@
+import type { StatusReactionEmojis } from "../channels/status-reactions.js";
 import type { DiscordPluralKitConfig } from "../discord/pluralkit.js";
 import type {
   BlockStreamingChunkConfig,
@@ -142,25 +143,6 @@ export type DiscordUiConfig = {
   components?: DiscordUiComponentsConfig;
 };
 
-export type DiscordStatusReactionEmojisConfig = {
-  /** Reaction while reasoning/thinking. Default: "🧠" */
-  thinking?: string;
-  /** Reaction for a generic tool call. Default: "🛠️" */
-  tool?: string;
-  /** Reaction for coding/file tool calls (exec, read, write, bash, …). Default: "💻" */
-  coding?: string;
-  /** Reaction for web/browser tool calls. Default: "🌐" */
-  web?: string;
-  /** Reaction shown on successful completion. Default: "✅" */
-  done?: string;
-  /** Reaction shown on error. Default: "❌" */
-  error?: string;
-  /** Reaction shown after a soft stall (default threshold: 10 s). Default: "⏳" */
-  stallSoft?: string;
-  /** Reaction shown after a hard stall (default threshold: 30 s). Default: "⚠️" */
-  stallHard?: string;
-};
-
 export type DiscordStatusReactionsConfig = {
   /**
    * If false, suppress all reactions entirely, including the initial ack.
@@ -169,7 +151,7 @@ export type DiscordStatusReactionsConfig = {
    */
   enabled?: boolean;
   /** Override individual phase emojis. Omit a key to keep the default. */
-  emojis?: DiscordStatusReactionEmojisConfig;
+  emojis?: StatusReactionEmojis;
 };
 
 export type DiscordThreadBindingsConfig = {
