@@ -6,9 +6,6 @@ FROM cgr.dev/chainguard/node:latest-dev AS builder
 
 USER root
 
-# Install bun (required for canvas:a2ui:bundle build step)
-RUN apk add --no-cache bun
-
 # Enable pnpm via corepack (ships with Node.js 16.9+)
 RUN corepack enable
 
@@ -44,7 +41,7 @@ ENV OPENCLAW_PREFER_PNPM=1
 RUN pnpm build && pnpm ui:build
 
 # Strip devDependencies before copying to runtime stage
-RUN pnpm prune --prod
+RUN CI=true pnpm prune --prod
 
 # --- Runtime stage ---
 # Minimal Chainguard node image — no shell, no package manager, runs as nonroot (uid 65532).
