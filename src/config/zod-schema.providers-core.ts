@@ -356,6 +356,25 @@ export const DiscordAccountSchema = z
       .optional(),
     responsePrefix: z.string().optional(),
     ackReaction: z.string().optional(),
+    statusReactions: z
+      .object({
+        enabled: z.boolean().optional(),
+        emojis: z
+          .object({
+            thinking: z.string().optional(),
+            tool: z.string().optional(),
+            coding: z.string().optional(),
+            web: z.string().optional(),
+            done: z.string().optional(),
+            error: z.string().optional(),
+            stallSoft: z.string().optional(),
+            stallHard: z.string().optional(),
+          })
+          .strict()
+          .optional(),
+      })
+      .strict()
+      .optional(),
     activity: z.string().optional(),
     status: z.enum(["online", "dnd", "idle", "invisible"]).optional(),
     activityType: z
