@@ -1,21 +1,27 @@
-FROM node:22-bookworm@sha256:cd7bcd2e7a1e6f72052feb023c7f6b722205d3fcab7bbcbd2d1bfdab10b1e935
+# syntax=docker/dockerfile:1
 
-# Install Bun (required for build scripts)
-RUN curl -fsSL https://bun.sh/install | bash
-ENV PATH="/root/.bun/bin:${PATH}"
+# --- Build stage ---
+# cgr.dev/chainguard/node:latest-dev is Wolfi-based (glibc) with shell, apk, and build tooling.
+FROM cgr.dev/chainguard/node:latest-dev AS builder
 
+USER root
+
+# Install bun (required for canvas:a2ui:bundle build step)
+RUN apk add --no-cache bun
+
+# Enable pnpm via corepack (ships with Node.js 16.9+)
 RUN corepack enable
 
 WORKDIR /app
 
+# Optional extra apk packages (equivalent to former OPENCLAW_DOCKER_APT_PACKAGES).
+# Package names follow wolfi/apk conventions, not apt.
 ARG OPENCLAW_DOCKER_APT_PACKAGES=""
 RUN if [ -n "$OPENCLAW_DOCKER_APT_PACKAGES" ]; then \
-      apt-get update && \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $OPENCLAW_DOCKER_APT_PACKAGES && \
-      apt-get clean && \
-      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
+      apk add --no-cache $OPENCLAW_DOCKER_APT_PACKAGES; \
     fi
 
+# Layer-cache dependency manifests before copying source
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml .npmrc ./
 COPY ui/package.json ./ui/package.json
 COPY patches ./patches
@@ -23,39 +29,45 @@ COPY scripts ./scripts
 
 RUN pnpm install --frozen-lockfile
 
-# Optionally install Chromium and Xvfb for browser automation.
+# Optionally bake Chromium into the image for browser automation.
 # Build with: docker build --build-arg OPENCLAW_INSTALL_BROWSER=1 ...
-# Adds ~300MB but eliminates the 60-90s Playwright install on every container start.
-# Must run after pnpm install so playwright-core is available in node_modules.
+# On Wolfi, chromium is installed via apk (no apt); xvfb is xvfb-run.
 ARG OPENCLAW_INSTALL_BROWSER=""
 RUN if [ -n "$OPENCLAW_INSTALL_BROWSER" ]; then \
-      apt-get update && \
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xvfb && \
-      node /app/node_modules/playwright-core/cli.js install --with-deps chromium && \
-      apt-get clean && \
-      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*; \
+      apk add --no-cache chromium xvfb-run; \
     fi
 
 COPY . .
-RUN pnpm build
-# Force pnpm for UI build (Bun may fail on ARM/Synology architectures)
+
+# Force pnpm for UI build (bun may fail on ARM/Synology)
 ENV OPENCLAW_PREFER_PNPM=1
-RUN pnpm ui:build
+RUN pnpm build && pnpm ui:build
+
+# Strip devDependencies before copying to runtime stage
+RUN pnpm prune --prod
+
+# --- Runtime stage ---
+# Minimal Chainguard node image — no shell, no package manager, runs as nonroot (uid 65532).
+FROM cgr.dev/chainguard/node:latest
+
+WORKDIR /app
+
+# Copy built artifacts and pruned production node_modules.
+# packages/ is included because pnpm workspace symlinks in node_modules point into it.
+COPY --from=builder --chown=nonroot:nonroot /app/dist ./dist
+COPY --from=builder --chown=nonroot:nonroot /app/node_modules ./node_modules
+COPY --from=builder --chown=nonroot:nonroot /app/packages ./packages
+COPY --from=builder --chown=nonroot:nonroot /app/openclaw.mjs ./openclaw.mjs
+COPY --from=builder --chown=nonroot:nonroot /app/package.json ./package.json
+COPY --from=builder --chown=nonroot:nonroot /app/pnpm-workspace.yaml ./pnpm-workspace.yaml
+
+# Chainguard images already run as nonroot (uid 65532) — no USER directive needed.
 
 ENV NODE_ENV=production
 
-# Allow non-root user to write temp files during runtime/tests.
-RUN chown -R node:node /app
+# Gateway WebSocket/HTTP port
+EXPOSE 18789
 
-# Security hardening: Run as non-root user
-# The node:22-bookworm image includes a 'node' user (uid 1000)
-# This reduces the attack surface by preventing container escape via root privileges
-USER node
-
-# Start gateway server with default config.
-# Binds to loopback (127.0.0.1) by default for security.
-#
-# For container platforms requiring external health checks:
-#   1. Set OPENCLAW_GATEWAY_TOKEN or OPENCLAW_GATEWAY_PASSWORD env var
-#   2. Override CMD: ["node","openclaw.mjs","gateway","--allow-unconfigured","--bind","lan"]
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+# Chainguard node image uses ENTRYPOINT ["/usr/bin/node"], so CMD args are passed to node.
+# --bind lan: listen on all interfaces (required for container networking, not just loopback).
+CMD ["openclaw.mjs", "gateway", "--allow-unconfigured", "--bind", "lan"]
